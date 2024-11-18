@@ -1,0 +1,205 @@
+---
+title: "Week 8 Lab"
+format: html
+---
+
+
+The following materials are based on materials developed by Dr. Chris Kibler for the UCSB Geography Department.
+
+## Background
+
+Phenology is the timing of life history events. Important phenological events for plants involve the growth of leaves, flowering, and senescence (death of leaves). Plants species adapt the timing of these events to local climate conditions to ensure successful reproduction. Subsequently, animal species often adapt their phenology to take advantage of food availability. As the climate shifts this synchronization is being thrown out of whack. Shifts in phenology are therefore a common yardstick of understanding how and if ecosystems are adjusting to climate change.
+
+Plant species may employ the following phenological strategies:
+
+- Winter deciduous: lose leaves in the winter, grow new leaves in the spring
+- Drought deciduous: lose leaves in the summer when water is limited
+- Evergreen: maintain leaves year-round
+
+
+## Task
+
+In this lab we are analyzing plant phenology near the Santa Clara River which flows from Santa Clarita to Ventura. We will investigate the phenology of the following plant communities:
+
+- Riparian forests: grow along the river, dominated by winter deciduous cottonwood and willow trees
+- Grasslands: grow in openspaces, dominated by drought deciduous grasses
+- Chaparral shrublands: grow in more arid habitats, dominated by evergreen shrubs
+
+To investigate the phenology of these plant communities we will use a time series of Landsat imagery and polygons identifying the locations of study sites within each plant community.
+
+Our primary goal is to compare seasonal patterns across vegetation communities. To do so, we will:
+
+- Convert spectral reflectance into a measure of vegetation productivity (NDVI)
+- Calculate NDVI throughout the year
+- Summarize NDVI values within vegetation communities
+- Visualize changes in NDVI within vegetation communities
+
+
+## Set Up 
+```{r}
+library(terra)
+library(sf)
+library(tidyverse)
+library(here)
+library(tmap)
+```
+
+## Create function to compute NDVI
+```{r}
+ndvi_fun <- function(nir, red){
+  (nir - red)/(nir + red)
+}
+```
+
+## Compute NDVI for a single scene 
+
+```{r}
+# Load in data for June 2018
+landsat_20180612 <- terra::rast(here("data", "landsat_20180612.tif"))
+
+# Rename layers (bands)
+names(landsat_20180612) <- c("blue", "green", "red", "NIR", "SWIR1", "SWIR2")
+
+# Use lappy function to compute NDVI
+ndvi_20180612 <- lapp(landsat_20180612[[c(4,3)]], fun = ndvi_fun)
+
+# Make a map to show NDVI
+tm_shape(ndvi_20180612) +
+  tm_raster(title = "NDVI") +
+  tm_layout(legend.outside = TRUE)
+```
+
+### Compute NDVI for all scenes 
+
+Create a function that will do what we did above for all the scenes
+
+```{r}
+# Clear environment
+rm(list = ls())
+
+# Function again 
+ndvi_fun <- function(nir, red){
+  (nir - red)/(nir + red)
+}
+```
+
+```{r}
+# Create list of file names 
+files <- list.files(here("data"), # where the files are located
+                    pattern = "*.tif", # files that end with .tif
+                    full.names = TRUE) # gives the full path
+
+
+create_ndvi_layer <- function(i){
+  #step 1: read in scene
+  landsat <- rast(files[i])
+  
+  #step 2: rename bands in scene
+  names(landsat) <- c("blue", "green", "red", "NIR", "SWIR1", "SWIR2")
+  
+  #step 3: compute NDVI
+  ndvi <- lapp(landsat[[c(4,3)]], fun = ndvi_fun)
+  
+  return(ndvi)
+}
+```
+
+```{r}
+# Read in all files to one raster stack using function 
+all_ndvi <- c(create_ndvi_layer(1),
+              create_ndvi_layer(2),
+              create_ndvi_layer(3),
+              create_ndvi_layer(4),
+              create_ndvi_layer(5),
+              create_ndvi_layer(6),
+              create_ndvi_layer(7),
+              create_ndvi_layer(8))
+
+# Update names 
+names(all_ndvi) <- c("2018-06-12", 
+                    "2018-08-15", 
+                    "2018-10-18", 
+                    "2018-11-03", 
+                    "2019-01-22", 
+                    "2019-02-23", 
+                    "2019-04-12", 
+                    "2019-07-01")
+```
+
+Can we do this more effectively
+```{r}
+# Extract the date from the file name to rename the layers 
+file_names <- data.frame(file_name = files) %>% 
+  mutate(date = str_sub(file_name, start = -12L, end = -5L)) # - = from the end of file name
+
+names(all_ndvi) <- file_names$date
+```
+
+## Compare NDVI across veg communities 
+
+### Get data on veg communities 
+
+```{r}
+sites <- st_read(here("data", "study_sites.shp"))
+
+tm_shape(all_ndvi[[1]]) +
+  tm_raster() +
+  tm_shape(sites) +
+  tm_borders()
+```
+
+### Extract NDVI at study sites 
+```{r}
+sites_ndvi <- terra::extract(all_ndvi, sites, fun = "mean")
+
+# Bind it back to og df to keep information 
+sites_annotated <- cbind(sites, sites_ndvi)
+```
+
+We’re done! Except our data is very untidy… Let’s tidy it up!
+
+- Convert to data frame
+- Turn from wide to long format
+- Turn layer names into date format
+- Combine study sites by vegetation type
+- Summarize results within vegetation types
+
+```{r}
+sites_clean <- sites_annotated %>% 
+  # drop columns
+  select(-ID) %>% 
+  st_drop_geometry() %>% 
+  # reformat data frame to long
+  pivot_longer(!study_site) %>% 
+  rename("NDVI" = value) %>% 
+  # create date 
+  mutate("year" = str_sub(name, 2, 5),
+         "month" = str_sub(name, 6, 7),
+         "day" = str_sub(name, 8, 9)) %>% 
+  # combine date elements 
+  unite("date", 4:6, sep = "-") %>% # collapse y m d into one column
+  mutate("date" = lubridate::as_date(date)) %>% 
+  # remove name column
+  select(-name) %>% 
+  # create new column to collapse forest 1-3
+  mutate("veg_type"= case_when(study_site== "forest1" ~ "forest",
+                               study_site== "forest2" ~ "forest",
+                               study_site== "forest3" ~ "forest",
+                               study_site== "grassland" ~ "grassland",
+                               study_site== "chaparral"~"chaparral")) %>% 
+  group_by(veg_type, date) %>% 
+  summarise("NDVI" = mean(NDVI, na.rm = TRUE))
+```
+
+```{r}
+ggplot(sites_clean, 
+       aes(x = date, y = NDVI, col = veg_type)) +
+  geom_line() +
+  geom_point() +
+  theme_light() + 
+  labs(x = " ", 
+       y = "Normalized Difference Vegetation Index (NDVI",
+       col = "Vegetation Type", 
+       title = "Seasonal cycle of vegetation productivity")
+```
+
